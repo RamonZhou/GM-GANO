@@ -5,6 +5,7 @@ This file is modified from Manuel Florez's code for
 """
 import numpy as np
 import pandas as pd
+from torch.utils.data import Dataset
 
 def rescale(v, v_min, v_max):
     """
@@ -40,7 +41,7 @@ def make_maps_scale(v_min, v_max):
     return (to_scale_11, to_real)
 
 
-class SeisData(object):
+class SeisData(Dataset):
     """
     Class to manage seismic data
     
@@ -258,6 +259,24 @@ class SeisData(object):
     def __str__(self):
         return 'wfs data shape: ' + str(self.wfs.shape)
 
+    def __len__(self):
+        """
+        Required by torch Dataset
+        """
+        return self.Ntrain
+
+    def __getitem__(self, idx):
+        """
+        Return one sample for DataLoader:
+        - waveform: [3, dimension]
+        - log10_PGA: [3]
+        - cond vars: [Ncond]
+        """
+        wfs_i = self.wfs[idx]
+        log10_pga_i = self.log10_PGA[idx]
+        vc_i = self.vc[idx]
+        return (wfs_i, log10_pga_i, vc_i)
+
     def get_Ntrain(self):
         """
         Get total number of training samples in the seismic dataset
@@ -274,4 +293,3 @@ class SeisData(object):
         return int(Nb_tot)
 
 # %%
-

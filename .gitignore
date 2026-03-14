@@ -1,0 +1,4 @@
+__pycache__
+kik_net_data/*
+plots/*
+losses_GANO.npy
