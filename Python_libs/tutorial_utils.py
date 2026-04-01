@@ -66,6 +66,40 @@ def convert_attributes(config, v_names):
     #print(v_c.shape) 
     return v_c 
 
+def from_syn(config, vn, attribute_name):
+    """
+    rescale to [-1, 1]
+    """
+    idx = config['condv_names'].index(attribute_name)
+    
+    v_min = config['condv_min_max'][idx][0]
+    v_max = config['condv_min_max'][idx][1]
+    
+    #print("idx, v_min, v_max", idx, v_min, v_max)
+    dv = v_max-v_min
+    # rescale to [0,1] # don't forget to rescale to [-1,1]
+    vn = (vn + 1.0) * 0.5
+    v_value = vn * dv + v_min
+
+    return v_value
+
+def revert_attributes(config, v_all):
+    """
+    convert attributes to normalized conditional variables, GmGANO takes normalized variables as input
+    """
+    
+    # mag_cur = from_syn(config, v_all[0], 'magnitude')
+    # dist_cur = from_syn(config, v_all[1], 'rrup')
+    # vs30_cur = from_syn(config, v_all[2], 'vs30')
+    # tect_cur = from_syn(config, v_all[3], 'tectonic_value')
+    # v_c = np.asanyarray([mag_cur, dist_cur, vs30_cur, tect_cur])
+    v_names = {}
+    for i, name in enumerate(config[condv_names]):
+        v_names[name] = from_syn(config, v_all[i], name)
+
+    #print(v_c.shape) 
+    return v_names
+
 def generate_scen_data(G, grf, v_all, fn_to_real=fn_to_real, one_condition=False, velocity=False, n_syn=100, ndim=6000, time_step=0.01, device='cpu'):
     """
     Generate synthetic data 

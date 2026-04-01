@@ -53,7 +53,7 @@ config_d = {
 
     'frac_train': 0.9,                                              # fraction of training
     'condv_names': ['magnitude','rrup', 'vs30', 'tectonic_value'],  # name of conditional variables
-    'condv_min_max' : [(4.5, 8.0), (0, 300), (100, 1100), (0,1)]    # [min, max] for each conditional variable
+    'condv_min_max' : [(4.0, 8.0), (0, 300), (100, 1100), (0,1)]    # [min, max] for each conditional variable
 
 }
 
