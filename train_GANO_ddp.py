@@ -8,6 +8,7 @@ import pandas as pd
 import pickle as pkl 
 import sys
 import argparse
+from time import perf_counter_ns
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
@@ -39,15 +40,15 @@ width= 32        # lift the dimension of input from 3 -> width
 lr = 1e-4        # learning rate
 
 # Training parameters
-epochs = 5      # training epochs
+epochs = 30      # training epochs
 λ_grad = 10.0    # penatly factor
 n_critic = 10    # train D n_critic times before train G
-batch_size = 2  # decrease batch_size if cuda is out of memory
+batch_size = 32  # decrease batch_size if cuda is out of memory
 
 config_d = {
     
-    'data_file': '/scratch/10845/kaichengz/data/waveform_100hz.npy',       # full dataset, shape [N, 3, ndim]
-    'attr_file': '/scratch/10845/kaichengz/data/attributes_100hz.csv',     # attribute file, contains magnitude, rupture distance, vs30, etc... for each record. 
+    'data_file': '/scratch/10845/kaichengz/data/vel_100hz_all.npy',       # full dataset, shape [N, 3, ndim]
+    'attr_file': '/scratch/10845/kaichengz/data/attributes_100hz_all.csv',     # attribute file, contains magnitude, rupture distance, vs30, etc... for each record. 
     'batch_size': batch_size,
 
     'frac_train': 0.9,                                              # fraction of training
@@ -56,10 +57,20 @@ config_d = {
 
 }
 
+parser = argparse.ArgumentParser(description='Train GANO with optional DDP')
+parser.add_argument('--epochs', type=int, default=epochs)
+parser.add_argument('--batch-size', type=int, default=batch_size)
+parser.add_argument('--n-critic', type=int, default=n_critic)
+parser.add_argument('--lr', type=float, default=lr)
+parser.add_argument('--master', type=str)
+parser.add_argument('--job-id', type=int, default=10000)
+args = parser.parse_args()
+master_hostname = args.master
+job_id = args.job_id
 
 # load the train and val indexes, guarantee reproductivity
-ix_train = np.load('./kik_net_data/index_train.npy', allow_pickle=True)
-ix_val = np.load('./kik_net_data/index_eval.npy', allow_pickle=True)
+ix_train = np.load('./kik_net_data/index_train_100hz_all.npy', allow_pickle=True)
+ix_val = np.load('./kik_net_data/index_eval_100hz_all.npy', allow_pickle=True)
 # ix_train = index[0]                                                 # index of training dataset                         
 # ix_val = index[1]                                                   # index of validation dataset
 
@@ -86,19 +97,9 @@ ix_val = np.load('./kik_net_data/index_eval.npy', allow_pickle=True)
 # index = []
 # index.append(ix_train)
 # index.append(ix_val)
-# np.save('./kik_net_data/index_train.npy', ix_train)
-# np.save('./kik_net_data/index_eval.npy', ix_val)
+# np.save('./kik_net_data/index_train_100hz_all.npy', ix_train)
+# np.save('./kik_net_data/index_eval_100hz_all.npy', ix_val)
 # exit(0)
-
-
-parser = argparse.ArgumentParser(description='Train GANO with optional DDP')
-parser.add_argument('--epochs', type=int, default=epochs)
-parser.add_argument('--batch_size', type=int, default=batch_size)
-parser.add_argument('--n_critic', type=int, default=n_critic)
-parser.add_argument('--lr', type=float, default=lr)
-parser.add_argument('--master', type=str)
-args = parser.parse_args()
-master_hostname = args.master
 
 epochs = args.epochs
 batch_size = args.batch_size
@@ -115,12 +116,12 @@ print(f"world_size {world_size}; rank {rank}")
 
 if is_distributed:
     backend = "nccl" if torch.cuda.is_available() else "gloo"
-    dist.init_process_group(backend=backend)
+    os.environ["MASTER_ADDR"] = master_hostname
+    os.environ["MASTER_PORT"] = "12355"
+    dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
 
 if torch.cuda.is_available():
     if is_distributed:
-        os.environ["MASTER_ADD"] = master_hostname
-        os.environ["MASTER_PORT"] = "12355"
         torch.cuda.set_device(local_rank)
         device = torch.device(f'cuda:{local_rank}')
     else:
@@ -178,9 +179,10 @@ if is_distributed:
     G = DDP(G, device_ids=[local_rank], output_device=local_rank)
 
 nn_params = sum(p.numel() for p in D.parameters() if p.requires_grad)
-print("Number discriminator parameters: ", nn_params)
 nn_params = sum(p.numel() for p in G.parameters() if p.requires_grad)
-print("Number generator parameters: ", nn_params)
+if is_main_process:
+    print("Number discriminator parameters: ", nn_params)
+    print("Number generator parameters: ", nn_params)
 
 
 G_optim = torch.optim.Adam(G.parameters(), lr=lr , weight_decay=1e-4)               # optimizer
@@ -190,6 +192,12 @@ D_scheduler = torch.optim.lr_scheduler.StepLR(D_optim, step_size=5, gamma=0.8)
 
 D.train()
 G.train()
+
+if is_main_process:
+    if not os.path.exists(f"./saved_models/s{job_id}"):
+        os.makedirs(f"./saved_models/s{job_id}")
+    if not os.path.exists(f"./plots/s{job_id}"):
+        os.makedirs(f"./plots/s{job_id}")
 
 def calculate_gradient_penalty(model, real_images, fake_images, label,device):
     """Calculates the gradient penalty loss for WGAN GP"""
@@ -242,6 +250,8 @@ def train_WGANO(D, G, epochs, D_optim, G_optim, scheduler=None):
     losses_G = np.zeros(epochs)
     losses_G_val = np.zeros(epochs)
     losses_W = np.zeros(epochs)
+    if is_main_process:
+        tbef = perf_counter_ns()
     for i in range(epochs):
         if train_sampler is not None:
             train_sampler.set_epoch(i)
@@ -273,7 +283,8 @@ def train_WGANO(D, G, epochs, D_optim, G_optim, scheduler=None):
                 # wasserstein regularizaiton
                 log10_PGA = log10_PGA.repeat(1, 1, (ndim+npad)).to(device)
                 x = torch.cat([x, log10_PGA], dim=1)
-                print("###", x_syn[:6], label[:6], D(x, label), D(x_syn, label))
+                # if is_main_process: 
+                #     print("###", x_syn[:6], label[:6], D(x, label), D(x_syn, label))
                 
                 W_loss = -torch.mean(D(x, label)) + torch.mean(D(x_syn, label))
                 gradient_penalty = calculate_gradient_penalty(D, x, x_syn, label, device)
@@ -299,7 +310,8 @@ def train_WGANO(D, G, epochs, D_optim, G_optim, scheduler=None):
 
             x_syn = G(grf.sample(x.shape[0]).to(device), label)
 
-            # print("###", x_syn[:6], label[:6], D(x_syn, label)) 
+            # if is_main_process:
+            #     print("###", x_syn[:6], label[:6], D(x_syn, label)) 
 
             loss = -torch.mean(D(x_syn, label))
             loss.backward()
@@ -310,7 +322,10 @@ def train_WGANO(D, G, epochs, D_optim, G_optim, scheduler=None):
             # Store validation information
             with torch.no_grad():
                 if is_main_process:
-                    print("epoch:[{} / {}] batch:[{} / {}],loss_G:{:.4f}".format(i, epochs, j, n_train_tot, loss.item()))   
+                    tnow = perf_counter_ns()
+                    tdif = tnow - tbef
+                    tbef = tnow
+                    print("epoch:[{} / {}] batch:[{} / {}] loss_G:{:.4f}  time {}s".format(i, epochs, j, n_train_tot, loss.item(), tdif / 1000000000))   
                 
                 # save training loss and validation loss 
                 try:
@@ -330,7 +345,7 @@ def train_WGANO(D, G, epochs, D_optim, G_optim, scheduler=None):
                     # check the label. 
                     cvs_np = cvs.detach().cpu().numpy() if torch.is_tensor(cvs) else cvs
                     mag = sdat_train.to_real(cvs_np[0][0], 'magnitude')
-                    dist = sdat_train.to_real(cvs_np[0][1], 'rrup')
+                    rrup = sdat_train.to_real(cvs_np[0][1], 'rrup')
                     vs30 = sdat_train.to_real(cvs_np[0][2], 'vs30')
                     tectonic_value = sdat_train.to_real(cvs_np[0][3],'tectonic_value')
                     if tectonic_value == 0.0:
@@ -339,8 +354,8 @@ def train_WGANO(D, G, epochs, D_optim, G_optim, scheduler=None):
                         tectonic_type = 'Shallow crustal'
                     fig, ax = plt.subplots(1, 1, figsize=(16,8), tight_layout=True)
                     ax.plot(x_syn[0,0,:].squeeze().detach().cpu().numpy())
-                    ax.set_title('M {} , {} km, $Vs_{{30}}$={}m/s, event= {}'.format(mag, dist, vs30, tectonic_type), fontsize=16)
-                    plt.savefig('./plots/epoch{}_it{}_GANO'.format(i,j))
+                    ax.set_title('M {} , {} km, $Vs_{{30}}$={}m/s, event= {}'.format(mag, rrup, vs30, tectonic_type), fontsize=16)
+                    plt.savefig(f"./plots/s{job_id}/epoch{i}_it{j}_GANO")
                     plt.close(fig)
 
         if is_distributed:
@@ -358,16 +373,17 @@ def train_WGANO(D, G, epochs, D_optim, G_optim, scheduler=None):
         G_scheduler.step()
         if (i+1) % 10 == 0 and is_main_process: #save the model every 10 epochs
             g_state = G.module.state_dict() if isinstance(G, DDP) else G.state_dict()
-            torch.save(g_state, "./saved_models/G_{}_GANO.pt".format(i+1))
+            torch.save(g_state, f"./saved_models/s{job_id}/G_{i+1}_GANO.pt")
         
     return losses_D, losses_G, losses_G_val, losses_W
 
 # create folder is not exist
 folder = "GANO_kik_net_training"
-if not os.path.exists(f"./saved_models/{folder}"):
-    os.makedirs(f"./saved_models/{folder}")
-if not os.path.exists(f"./plots/{folder}"):
-    os.makedirs(f"./plots/{folder}")
+if is_main_process:
+    if not os.path.exists(f"./saved_models/{folder}"):
+        os.makedirs(f"./saved_models/{folder}")
+    if not os.path.exists(f"./plots/{folder}"):
+        os.makedirs(f"./plots/{folder}")
 
 start = timeit.default_timer() # track the time for training
 losses_D, losses_G, losses_G_val, losses_W = train_WGANO(D, G, epochs, D_optim, G_optim)
@@ -394,7 +410,7 @@ if is_main_process:
     losses_all['losses_G_val'] = losses_G_val
     losses_all['losses_W'] = losses_W
 
-    losses_all.to_csv("./losses_GANO.npy")
+    losses_all.to_csv(f"./losses_GANO.s{job_id}.npy")
 
 if is_distributed:
     dist.destroy_process_group()

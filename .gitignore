@@ -1,4 +1,7 @@
 __pycache__
 kik_net_data/*
 plots/*
+saved_models/*
 losses_GANO.npy
+losses_GANO.*
+GANO.o*
